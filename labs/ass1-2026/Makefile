@@ -31,6 +31,31 @@ ALLFIRMWARE=firmware00_baseline.hex \
 	firmware07_mret.hex \
 	firmware08_illegal.hex \
 	firmware09_illegal_mret.hex \
+	firmware10_csrrs_set.hex \
+	firmware11_csrrc_clear.hex \
+	firmware12_csr_imm_forms.hex \
+	firmware13_mstatus_wpri.hex \
+	firmware14_mie_mask.hex \
+	firmware15_mip_readonly.hex \
+	firmware16_mcause_mepc_ro.hex \
+	firmware17_gie_lifecycle.hex \
+	firmware18_long_pin_double_take.hex \
+	firmware19_pending_then_enable.hex \
+	firmware20_trap_then_interrupt.hex \
+	firmware21_mscratch_swap.hex \
+	firmware22_lwsw_across_interrupt.hex \
+	firmware23_double_illegal.hex \
+
+# firmware18 holds the pin high through the handler return; the stock
+# one-cycle pulse is right for everything else.
+ifeq ($(findstring firmware18,$(FIRMWAREFILE)),firmware18)
+TON ?= 35
+TOFF ?= 80
+else
+TON ?= 35
+TOFF ?= 36
+endif
+
 
 all:	$(FIRMWAREFILE) test_verilator # nerv.asc
 
@@ -60,6 +85,7 @@ test_verilator: testbench_verilator
 testbench_verilator: $(FIRMWAREFILE) testbench.sv nerv-interrupt.sv testbench.cpp
 	$(VERILATOR) --cc --exe -Wno-lint -trace --top-module testbench \
 	-Gfirmwarefile=\"$(FIRMWAREFILE)\" \
+	-Gton_intr=$(TON) -Gtoff_intr=$(TOFF) \
 	testbench.sv nerv-interrupt.sv testbench.cpp
 	$(MAKE) -C obj_dir -f Vtestbench.mk
 

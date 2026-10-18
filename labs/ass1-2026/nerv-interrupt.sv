@@ -63,7 +63,7 @@ module nerv #(
 
 
  // instruction memory pointer
-    assign  imem_addr = pc;
+    assign imem_addr = reset ? RESET_ADDR : npc;
     assign  insn = imem_data;
 
  // Debugging
@@ -79,6 +79,7 @@ module nerv #(
     // trap is an output to show that execution has halted 
     logic illegalinsn;
     logic trapped;
+	logic halt;
     assign trap = trapped;
 
 	
@@ -157,7 +158,7 @@ module nerv #(
 	assign uimm = insn_rs1;
 
 
-	always_comb begin
+	always_comb begin	
     	csr_re = 32'h0;   // logic for csr read enable
     	if (insn_opcode == `OPCODE_ZICSR) begin
         	case (insn_funct3)
@@ -165,13 +166,14 @@ module nerv #(
                 	csr_re = (insn_rd != 0) ? 32'hFFFFFFFF : 32'h0;
             	3'b010, 3'b011, 3'b110, 3'b111:   // CSRRS, CSRRC, CSRRSI, CSRRCI: always read
                 	csr_re = 32'hFFFFFFFF;
-            	default:                          // 000 = ecall/ebreak/mret, 100 reserved
+            	default:                          // 000 = ecall/ebreak/mret, 
                 	csr_re = 32'h0;
         endcase
     end end
+	//double check this above logic lmao. Its just checking for the edge cases where a register is 0 or a result is 0.
+	//The description of these edge cases was in the risc docs
 
 
-	//double check this above logic lmao
     // ALU 
 	logic  alu_eq_zero;
     logic  [31:0] alu_result;
@@ -183,7 +185,7 @@ module nerv #(
 
 
 
-always_comb begin
+always_comb begin  //This is the same old ALU stuff from the labs. Nothing has been changed
 	alu_op = `ALU_ADD; 
 		case (insn_opcode)
 			`OPCODE_OP_IMM: begin
@@ -226,6 +228,7 @@ always_comb begin
                     3'b 101 /* BGE */ : alu_op = `ALU_SLT;
                     3'b 110 /* BLTU*/ : alu_op = `ALU_SLTU; 
                     3'b 111 /* BGEU*/ : alu_op = `ALU_SLTU; 
+					default: illegalinsn = 1;
 
                 endcase
             end
@@ -233,6 +236,9 @@ always_comb begin
 			
         endcase
     end
+
+
+
 
     // instantiate ALU
 	alu alu_1 (
@@ -243,12 +249,14 @@ always_comb begin
 		.result_eq_zero(alu_eq_zero)
 	);
 
+
 	// combinational assignment of control signals
     logic   regwrite;
     logic   [31:0] npc;
     logic   [31:0] rfilewdata;
-    
-
+	logic take_intr; //the variable called intr is the actual interrupt signal. This is an extra control signal
+					//It is the result of checking if the mstatus and mie bits are high.
+    logic mret_flag; //just a flag used in flipflo logic that says when mret is being used.
 	
 
 
@@ -256,133 +264,157 @@ always_comb begin
 
 	// control signals for CPU
     always_comb begin
-		illegalinsn = 0;
+		illegalinsn = 0; //default values
 		regwrite = 0;
+		take_intr = 0; 
 		npc = pc + 4;
 		csr_we = 0;
 		csr_wdata = 0; 
         rfilewdata = alu_result;
+		dmem_wr_enable = 0; 
+		mret_flag = 0; 
+		halt = 0;
 
-		case (insn_opcode)
+		take_intr = csr_mip[11] & csr_mie[11] & csr_mstatus[3]; //
+		if (take_intr) begin
+			npc = MTVEC_ADDR; end //we dont want anything to change. 
+	
+		else begin //standard opcode checks
+
+			case (insn_opcode)
 			
 
-			`OPCODE_OP_IMM: begin
-                regwrite = 1;
-			end
+				`OPCODE_OP_IMM: begin
+                	regwrite = 1;
+				end
 
-			`OPCODE_OP: begin
-                regwrite = 1;
-			end
+				`OPCODE_OP: begin
+            	    regwrite = 1;
+				end
 
-            `OPCODE_JAL: begin
-                // LAB implement JAL control signals here
-                regwrite = 1;
-                rfilewdata = pc + 4;
-                npc = pc + imm_j_sext; 
-            end
+            	`OPCODE_JAL: begin
+                	// LAB implement JAL control signals here
+                	regwrite = 1;
+                	rfilewdata = pc + 4;
+                	npc = pc + imm_j_sext; 
+            	end
 
-            `OPCODE_JALR: begin
-                // LAB implement JALR control signals here
-                regwrite = 1; 
-                rfilewdata = pc + 4; 
-                npc = (regfile[insn_rs1] + imm_i_sext) & ~32'b 1; 
-            end
+            	`OPCODE_JALR: begin
+                	// LAB implement JALR control signals here
+                	regwrite = 1; 
+                	rfilewdata = pc + 4; 
+                	npc = (regfile[insn_rs1] + imm_i_sext) & ~32'b 1; 
+            	end
 
-			// branch instructions: Branch If Equal, Branch Not Equal, Branch Less Than, Branch Greater Than, Branch Less Than Unsigned, Branch Greater Than Unsigned
-		    `OPCODE_BRANCH: begin
-                case (insn_funct3)
-                    3'b 000 /* BEQ  */: begin if (alu_eq_zero) npc = pc + imm_b_sext; end
-                    3'b 001 /* BNE */ : begin if (alu_eq_zero == 0) npc = pc + imm_b_sext; end
-                    3'b 100 /* BLT */ : begin if (alu_eq_zero == 0) npc = pc + imm_b_sext; end
-                    3'b 101 /* BGE */ : begin if (alu_eq_zero == 1) npc = pc + imm_b_sext; end
-                    3'b 110 /* BLTU */: begin if (alu_eq_zero == 0) npc = pc + imm_b_sext; end
-                    3'b 111 /* BGEU */: begin if (alu_eq_zero == 1) npc = pc + imm_b_sext; end
+				// branch instructions: Branch If Equal, Branch Not Equal, Branch Less Than, Branch Greater Than, Branch Less Than Unsigned, Branch Greater Than Unsigned
+				`OPCODE_BRANCH: begin
+					case (insn_funct3)
+						3'b 000 /* BEQ  */: begin if (alu_eq_zero) npc = pc + imm_b_sext; end
+						3'b 001 /* BNE */ : begin if (alu_eq_zero == 0) npc = pc + imm_b_sext; end
+						3'b 100 /* BLT */ : begin if (alu_eq_zero == 0) npc = pc + imm_b_sext; end
+						3'b 101 /* BGE */ : begin if (alu_eq_zero == 1) npc = pc + imm_b_sext; end
+						3'b 110 /* BLTU */: begin if (alu_eq_zero == 0) npc = pc + imm_b_sext; end
+						3'b 111 /* BGEU */: begin if (alu_eq_zero == 1) npc = pc + imm_b_sext; end
 
-					default: illegalinsn = 1;
-				endcase
-			end
-
-            `OPCODE_LOAD: begin
-                // LAB implement LW here
-                regwrite = 1; 
-                dmem_rd_addr = regfile[insn_rs1] + imm_i_sext;
-                dmem_rd_data = dmem[dmem_rd_addr];
-                rfilewdata = dmem_rd_data;
-		       // $display("lw from 0x%08x = 0x%08x", dmem_rd_addr, dmem_rd_data);
-            end
-			`OPCODE_ZICSR: begin
-				case(insn_funct3)
-					3'b001 /*CSRRW*/: 
-						begin csr_wdata = regfile[insn_rs1]; 
-							  csr_we = 32'hFFFFFFFF;
-							  rfilewdata = csr_rdata;
-							  regwrite = 1; 
-						end
-					3'b010 /*CSRRS*/:
-						begin rfilewdata = csr_rdata;
-							  regwrite = 1; 
-							  csr_we = insn_rs1 != 0 ? regfile[insn_rs1]: 32'h00000000; //we only want to enable change where the bits are 1 in rs1. 
-							  csr_wdata = 32'hFFFFFFFF;  // and we want to change them to 1
-						end 
-					3'b011 /*CSRRC*/:
-						begin rfilewdata = csr_rdata; 
-							  regwrite = 1; 
-							  csr_we = insn_rs1 != 0 ? regfile[insn_rs1]: 32'h00000000; //We only want to enable change where the bits are 1 in rs1
-							  csr_wdata = 32'h00000000;// and we want to change them to 0
-						end
-					3'b101 /*CSRRWI*/:
-						begin csr_wdata = uimm;
-							  csr_we = 32'hFFFFFFFF;
-							  rfilewdata = csr_rdata;
-							  regwrite = 1; 
-						end
-					3'b110 /*CSRRSI*/:
-						begin rfilewdata = csr_rdata;
-							  regwrite = 1; 
-							  csr_we = uimm != 0 ? uimm: 32'h00000000; //we only want to enable change where the bits are 1 in rs1. 
-							  csr_wdata = 32'hFFFFFFFF;  // and we want to change them to 1
-						end 
-					3'b111 /*CSRRCI*/: 
-						begin rfilewdata = csr_rdata; 
-							  regwrite = 1; 
-							  csr_we = uimm != 0 ? uimm: 32'h00000000; //We only want to enable change where the bits are 1 in rs1
-							  csr_wdata = 32'h00000000;// and we wan tto change them to 0
-						end
-
-					default: illegalinsn = 1;
+						default: illegalinsn = 1;
 					endcase
+				end
+
+				`OPCODE_LOAD: begin
+					// LAB implement LW here
+					regwrite = 1; 
+					dmem_rd_addr = regfile[insn_rs1] + imm_i_sext;
+					dmem_rd_data = dmem[dmem_rd_addr];
+					rfilewdata = dmem_rd_data;
+				// $display("lw from 0x%08x = 0x%08x", dmem_rd_addr, dmem_rd_data);
+				end
+				`OPCODE_ZICSR: begin
+					case(insn_funct3)
+						3'b001 /*CSRRW*/: 
+							begin csr_wdata = regfile[insn_rs1]; 
+								csr_we = 32'hFFFFFFFF;
+								rfilewdata = csr_rdata;
+								regwrite = 1; 
+							end
+						3'b010 /*CSRRS*/:
+							begin rfilewdata = csr_rdata;
+								regwrite = 1; 
+								csr_we = insn_rs1 != 0 ? regfile[insn_rs1]: 32'h00000000; //we only want to enable change where the bits are 1 in rs1. 
+								csr_wdata = 32'hFFFFFFFF;  // and we want to change them to 1
+							end 
+						3'b011 /*CSRRC*/:
+							begin rfilewdata = csr_rdata; 
+								regwrite = 1; 
+								csr_we = insn_rs1 != 0 ? regfile[insn_rs1]: 32'h00000000; //We only want to enable change where the bits are 1 in rs1
+								csr_wdata = 32'h00000000;// and we want to change them to 0
+							end
+						3'b101 /*CSRRWI*/:
+							begin csr_wdata = uimm;
+								csr_we = 32'hFFFFFFFF;
+								rfilewdata = csr_rdata;
+								regwrite = 1; 
+							end
+						3'b110 /*CSRRSI*/:
+							begin rfilewdata = csr_rdata;
+								regwrite = 1; 
+								csr_we = uimm != 0 ? uimm: 32'h00000000; //we only want to enable change where the bits are 1 in rs1. 
+								csr_wdata = 32'hFFFFFFFF;  // and we want to change them to 1
+							end 
+						3'b111 /*CSRRCI*/: 
+							begin rfilewdata = csr_rdata; 
+								regwrite = 1; 
+								csr_we = uimm != 0 ? uimm: 32'h00000000; //We only want to enable change where the bits are 1 in rs1
+								csr_wdata = 32'h00000000;// and we wan tto change them to 0
+							end
+						3'b000 : begin
+						if (insn_funct7 != 0) /*MRET*/ 
+							begin npc = csr_mepc;  //if funct7 is 0 then it is ebreak, mret and ebreak share the same funct3.
+								mret_flag = 1; 
+							end 
+						else begin halt = 1; end //ebreak now sets a halt flag, which triggers trap output stopping the cpu.
+						end
+								
+
+						default: illegalinsn = 1; //if instruction never recognised, defaults to illegal
+						endcase
+				end
+
+
+				`OPCODE_STORE: begin
+					dmem_wr_enable = 1; 
+					dmem_wr_addr = regfile[insn_rs1] + imm_s_sext; 
+					dmem_wr_data = regfile[insn_rs2];
+					
+					// LAB implement SW here
+
+					
+				end
+
+				default: illegalinsn = 1;
+			endcase
+			// check that branches etc weren't to an unaligned address
+			if ((npc & 32'b11) != 0) begin
+				illegalinsn = 1;
+				npc = pc & ~32'b 11;
 			end
 
-
-            `OPCODE_STORE: begin
-                dmem_wr_enable = 1; 
-                dmem_wr_addr = regfile[insn_rs1] + imm_s_sext; 
-                dmem_wr_data = regfile[insn_rs2];
-                
-                // LAB implement SW here
-
-		        $display("sw 0x%08x to = 0x%08x", regfile[insn_rs2], dmem_wr_addr);
-            end
-
-			default: illegalinsn = 1;
-		endcase
-        // check that branches etc weren't to an unaligned address
-		if ((npc & 32'b11) != 0) begin
-			illegalinsn = 1;
-			npc = pc & ~32'b 11;
 		end
+
+		if (illegalinsn) begin
+    		npc = MTVEC_ADDR; //have to place this after the previous checks cause they set illegalinsn
+    		regwrite = 0; csr_we = 0; dmem_wr_enable = 0; mret_flag = 0; halt = 0;
+		end //these checks can modify the other signals, so we have to return them back to 0
 	end
 
     // every cycle
     always_ff @(posedge clock) begin
-		if (!trapped && !reset) begin
-			if (illegalinsn)
-				trapped <= 1;
-	
-        pc <= npc;
-        
 
-        if (regwrite && insn_rd > 0) 
+		if (!trapped && !reset) begin
+			if (halt) //if ebreak we stop
+				trapped <= 1; //This not the same as trap condition.
+		end
+
+        if (regwrite && insn_rd > 0) begin
             regfile[insn_rd] <= rfilewdata;
             
     	end
@@ -392,23 +424,45 @@ always_comb begin
             dmem[dmem_wr_addr] <= dmem_wr_data;
 
         // reset
+
+		pc <= npc;
+
         if (reset) begin
 		    pc <= 0;
            	trapped <= 0;
         end
 
-        // debugging signals, note these are updated with 1 cycle delay
-        d_x0 = regfile[0];
-        d_x1 = regfile[1];
-        d_x2 = regfile[2];
-        d_x3 = regfile[3];
-        d_x4 = regfile[4];
-        d_rd = insn_rd;
-        testmem = dmem[36];
-        d_opcode <= insn_opcode;
+        
+		if (reset) begin
+			csr_mepc   <= 32'h0;
+			csr_mip    <= 32'h0;
+			csr_mcause <= 32'h0;
+		end
+		else begin
+			if (intr) begin
+				csr_mip[11]  <= 1;  //set the mip bit when interrupt
+			end 
+
+			else if (mret_flag) begin
+				csr_mip <= 32'h0; end //when mret happens clear that bit.
+
+
+			if (take_intr) begin
+				csr_mepc <= pc; 
+				csr_mcause <= 32'h8000000B;	end
+			
+			else if (illegalinsn) begin
+				csr_mepc <= pc+4; 
+				csr_mcause <= 32'h00000002;end
+		
+		end
+
+		
+
+		$display("pc=%h illegalinsn = %h csr_mcause = %h  halt = %h csr_mepc = %h insn=%h take_intr=%b mip=%h mie=%h mstatus=%h x0 = %0d x1 = %0d x2 = %0d x3 =%0d x4 = %0d x5=%0d x6=%0d x7 = %0d x8 = %0d x9 = %0d x10=%0d ", pc, illegalinsn,csr_mcause, halt, csr_mepc, insn, take_intr, csr_mip, csr_mie, csr_mstatus, regfile[0],regfile[1],regfile[2],regfile[3],regfile[4],regfile[5],regfile[6],regfile[7],regfile[8],regfile[9],regfile[10]);
+		
 
     end
-
 
 
 
@@ -423,17 +477,10 @@ always_comb begin
 	wire  [31:0] csr_mstatus;
 	wire  [31:0] csr_mscratch;
  
-	always_ff @(posedge clock) begin
-		if (reset) begin
-			csr_mepc   <= 32'h0;
-			csr_mip    <= 32'h0;
-			csr_mcause <= 32'h0;
-		end
-		// TODO: update mepc / mip / mcause on interrupt, trap and mret
-	end
- 
 	
- 
+
+
+
 	// instantiate the CSR file
 	csrfile csr_file (
 		.clock(clock),
@@ -449,12 +496,20 @@ always_comb begin
 		.ro_mtvec_bits(csr_mtvec),
 		.ro_mip_bits(csr_mip),
 		.ro_mcause_bits(csr_mcause),
-		.rw_mscratch_bits(csr_mscratch)
+		.rw_mscratch_bits(csr_mscratch),
+		.take_intr(take_intr),
+		.mret_flag(mret_flag)
 	);
  
  
 endmodule
  
+
+
+
+
+
+
  
 // CSR file.  Slightly different than register file since it's bit addressable
 // this skeleton provides bit addressable read & write.
@@ -470,6 +525,8 @@ module csrfile
 	input  wire [31:0] we,		// bit-addressable read enable
 	output wire [31:0] rdata,	// CSR bits  for read out (use w/ re lines)
 	input  wire [31:0] wdata,	// CSR bits for write input (use w/ we lines)
+	input  wire take_intr,
+	input wire mret_flag, 
  
 	// raw bits
 	input  wire [31:0] ro_mepc_bits,	// actual internal bits of MEPC register
@@ -487,6 +544,7 @@ module csrfile
 	logic [31:0] mie_bits;
 	logic [31:0] mscratch_bits;
 	logic [31:0] mstatus_bits;
+	
 	
  
 	genvar i;
@@ -518,12 +576,19 @@ module csrfile
 					mscratch_bits[i] <= 0;
 					mstatus_bits[i] <= 0;
 				end
+				else if(take_intr == 1)
+					mstatus_bits[3] <= 0; 
+				else if(mret_flag == 1)
+					mstatus_bits[3] <= 1; 
+
 				else if(addr == CSR_MIE && we[i])
 					mie_bits[i] <= wdata[i];
 				else if(addr == CSR_MSCRATCH && we[i])
 					mscratch_bits[i] <= wdata[i];
 				else if(addr == CSR_MSTATUS && we[i])
 					mstatus_bits[i] <= wdata[i];
+				
+				
 			end
 		end: gen_write_bits
 	endgenerate

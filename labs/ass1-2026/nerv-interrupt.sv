@@ -88,7 +88,7 @@ module nerv #(
 
 
     // registers, instruction reg, program counter, next pc
-    logic   [31:0] regfile [0:`NUMREGS-1];
+    logic  signed [31:0] regfile [0:`NUMREGS-1];
     logic   [31:0] pc;
     logic   [31:0] insn;
 
@@ -176,10 +176,10 @@ module nerv #(
 
     // ALU 
 	logic  alu_eq_zero;
-    logic  [31:0] alu_result;
+    logic signed [31:0] alu_result;
     logic  alu_eq;
-    wire   [31:0] alu_op_a = regfile[insn_rs1];
-	wire   [31:0] alu_op_b = insn_opcode == `OPCODE_OP_IMM ? 
+    wire   signed [31:0] alu_op_a = regfile[insn_rs1];
+	wire   signed [31:0] alu_op_b = insn_opcode == `OPCODE_OP_IMM ? 
                                 imm_val : regfile[insn_rs2];
 	logic   [4:0] alu_op;
 
@@ -459,7 +459,7 @@ always_comb begin  //This is the same old ALU stuff from the labs. Nothing has b
 
 		
 
-		$display("pc=%h illegalinsn = %h csr_mcause = %h  halt = %h csr_mepc = %h insn=%h take_intr=%b mip=%h mie=%h mstatus=%h x0 = %0d x1 = %0d x2 = %0d x3 =%0d x4 = %0d x5=%0d x6=%0d x7 = %0d x8 = %0d x9 = %0d x10=%0d ", pc, illegalinsn,csr_mcause, halt, csr_mepc, insn, take_intr, csr_mip, csr_mie, csr_mstatus, regfile[0],regfile[1],regfile[2],regfile[3],regfile[4],regfile[5],regfile[6],regfile[7],regfile[8],regfile[9],regfile[10]);
+		$display("pc=%h illegalinsn = %h intr = %h csr_mcause = %h  halt = %h csr_mepc = %h insn=%h take_intr=%b mip=%h mie=%h mstatus=%h x0 = %0d x1 = %0d x2 = %0d x3 =%0d x4 = %0d x5=%0d x6=%0d x7 = %0d x8 = %0d x9 = %0d x10=%0d ", pc, illegalinsn,intr, csr_mcause, halt, csr_mepc, insn, take_intr, csr_mip, csr_mie, csr_mstatus, $signed(regfile[0]),$signed(regfile[1]),$signed(regfile[2]),$signed(regfile[3]),$signed(regfile[4]),$signed(regfile[5]),regfile[6],regfile[7],regfile[8],regfile[9],regfile[10]);
 		
 
     end
@@ -474,7 +474,7 @@ always_comb begin  //This is the same old ALU stuff from the labs. Nothing has b
 	wire  [31:0] csr_mtvec = MTVEC_ADDR;
 	// read-write CSRs: flip-flops live inside csrfile, exposed here
 	wire  [31:0] csr_mie;
-	wire  [31:0] csr_mstatus;
+	wire  signed [31:0] csr_mstatus;
 	wire  [31:0] csr_mscratch;
  
 	
@@ -524,13 +524,13 @@ module csrfile
 	input  wire [31:0] re,		// bit-addressable write enable
 	input  wire [31:0] we,		// bit-addressable read enable
 	output wire [31:0] rdata,	// CSR bits  for read out (use w/ re lines)
-	input  wire [31:0] wdata,	// CSR bits for write input (use w/ we lines)
+	input  wire signed [31:0] wdata,	// CSR bits for write input (use w/ we lines)
 	input  wire take_intr,
 	input wire mret_flag, 
  
 	// raw bits
 	input  wire [31:0] ro_mepc_bits,	// actual internal bits of MEPC register
-	output wire [31:0] rw_mstatus_bits,	// ... etc
+	output wire signed [31:0] rw_mstatus_bits,	// ... etc
 	output wire [31:0] rw_mie_bits,
 	input  wire [31:0] ro_mtvec_bits,
 	input  wire [31:0] ro_mip_bits,

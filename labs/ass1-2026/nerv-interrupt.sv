@@ -581,11 +581,11 @@ module csrfile
 				else if(mret_flag == 1)
 					mstatus_bits[3] <= 1; 
 
-				else if(addr == CSR_MIE && we[i])
+				else if(addr == CSR_MIE && we[i] && i == 11)
 					mie_bits[i] <= wdata[i];
 				else if(addr == CSR_MSCRATCH && we[i])
 					mscratch_bits[i] <= wdata[i];
-				else if(addr == CSR_MSTATUS && we[i])
+				else if(addr == CSR_MSTATUS && we[i] && i == 3)
 					mstatus_bits[i] <= wdata[i];
 				
 				

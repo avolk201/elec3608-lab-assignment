@@ -1,5 +1,6 @@
 import argparse
 import re
+import sys
 
 #######
 ## A script to extract the expected ending register values for comparison
@@ -15,6 +16,10 @@ import re
 ##            expect h0:x6 = 0xc1 (core 1)
 ##        */
 ## @author Rich Rademacher
+##
+## Exit code is the failure count so make and scripts can read the verdict.
+## A missing key or an unparseable value (x from an unfinished design) is a
+## failure, not a crash.
 
 # create a parser object
 parser = argparse.ArgumentParser(description = "Check registers")
@@ -39,9 +44,15 @@ result = re.findall(r'\s*(h[01])\s*:\s*([^= ]+)\s*=\s*(\S+)', logdat)
 expected = re.findall(r' expect (h[01])\s*:\s*([^= ]+)\s*=\s*(\S+)', expdat)
 
 # create map
+def toint(s):
+    try:
+        return int(s, 0)
+    except ValueError:
+        return None
+
 rmap = dict()
 for entry in result:
-    rmap[str(entry[0])+":"+entry[1]] = int(entry[2], 0)
+    rmap[str(entry[0])+":"+entry[1]] = toint(entry[2])
 
 print("Source file:", args.truthfile, "   Sim file:", args.logfile)
 
@@ -49,11 +60,15 @@ print("Source file:", args.truthfile, "   Sim file:", args.logfile)
 nwrong = 0
 for e in expected:
     key = e[0]+":"+e[1]
-    val = int(e[2],0)
+    val = toint(e[2])
 
-    if(val != rmap[key]):
+    if key not in rmap:
+        print(" ", key, "expected", e[2], " got  MISSING from log")
+        nwrong += 1
+    elif val != rmap[key]:
         print(" ", key, "expected", val, " got ", rmap[key])
         nwrong += 1
 
 print("Total failures =", nwrong, "of", len(expected), "tests")
 print()
+sys.exit(min(nwrong, 125))

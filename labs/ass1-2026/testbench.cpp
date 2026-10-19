@@ -28,10 +28,19 @@ int main(int argc, char **argv, char **env)
 
 	top->clock = 0;
 	top->reset = 1;
+	// Watchdog: the longest test retires ~160 instructions, so 20000
+	// cycles is two orders of margin.  Expiry is a failure, not an exit;
+	// a program that never reaches ebreak must not print register values.
 	int t = 0;
 	while (!Verilated::gotFinish()) {
 		if (t > 200)
 			top->reset = 0;
+		if (t > 200000) {
+			printf("FAIL: watchdog expired at 20000 cycles without ebreak\n");
+			if (tfp) tfp->close();
+			delete top;
+			exit(1);
+		}
 		top->clock = !top->clock;
 		top->eval();
 		if (tfp) tfp->dump (t);

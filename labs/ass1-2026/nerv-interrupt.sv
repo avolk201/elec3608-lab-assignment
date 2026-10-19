@@ -63,7 +63,7 @@ module nerv #(
 
 
  // instruction memory pointer
-    assign imem_addr = reset ? RESET_ADDR : npc;
+    assign imem_addr = reset ? RESET_ADDR : pc;
     assign  insn = imem_data;
 
  // Debugging
@@ -91,6 +91,9 @@ module nerv #(
     logic  signed [31:0] regfile [0:`NUMREGS-1];
     logic   [31:0] pc;
     logic   [31:0] insn;
+	logic   [31:0] ppc;
+	logic   pipe_valid;
+	logic   xe_flush;
 
     // components of the instruction
     logic   [6:0] insn_funct7;
@@ -267,7 +270,7 @@ always_comb begin  //This is the same old ALU stuff from the labs. Nothing has b
 		illegalinsn = 0; //default values
 		regwrite = 0;
 		take_intr = 0; 
-		npc = pc + 4;
+		npc = ppc + 4;
 		csr_we = 0;
 		csr_wdata = 0; 
         rfilewdata = alu_result;
@@ -275,7 +278,7 @@ always_comb begin  //This is the same old ALU stuff from the labs. Nothing has b
 		mret_flag = 0; 
 		halt = 0;
 
-		take_intr = csr_mip[11] & csr_mie[11] & csr_mstatus[3]; //
+		take_intr = csr_mip[11] & csr_mie[11] & csr_mstatus[3] & pipe_valid & !xe_flush; // dying slots must not consume the pending bit
 		if (take_intr) begin
 			npc = MTVEC_ADDR; end //we dont want anything to change. 
 	
@@ -295,26 +298,26 @@ always_comb begin  //This is the same old ALU stuff from the labs. Nothing has b
             	`OPCODE_JAL: begin
                 	// LAB implement JAL control signals here
                 	regwrite = 1;
-                	rfilewdata = pc + 4;
-                	npc = pc + imm_j_sext; 
+                	rfilewdata = ppc + 4;
+                	npc = ppc + imm_j_sext; 
             	end
 
             	`OPCODE_JALR: begin
                 	// LAB implement JALR control signals here
                 	regwrite = 1; 
-                	rfilewdata = pc + 4; 
+                	rfilewdata = ppc + 4; 
                 	npc = (regfile[insn_rs1] + imm_i_sext) & ~32'b 1; 
             	end
 
 				// branch instructions: Branch If Equal, Branch Not Equal, Branch Less Than, Branch Greater Than, Branch Less Than Unsigned, Branch Greater Than Unsigned
 				`OPCODE_BRANCH: begin
 					case (insn_funct3)
-						3'b 000 /* BEQ  */: begin if (alu_eq_zero) npc = pc + imm_b_sext; end
-						3'b 001 /* BNE */ : begin if (alu_eq_zero == 0) npc = pc + imm_b_sext; end
-						3'b 100 /* BLT */ : begin if (alu_eq_zero == 0) npc = pc + imm_b_sext; end
-						3'b 101 /* BGE */ : begin if (alu_eq_zero == 1) npc = pc + imm_b_sext; end
-						3'b 110 /* BLTU */: begin if (alu_eq_zero == 0) npc = pc + imm_b_sext; end
-						3'b 111 /* BGEU */: begin if (alu_eq_zero == 1) npc = pc + imm_b_sext; end
+						3'b 000 /* BEQ  */: begin if (alu_eq_zero) npc = ppc + imm_b_sext; end
+						3'b 001 /* BNE */ : begin if (alu_eq_zero == 0) npc = ppc + imm_b_sext; end
+						3'b 100 /* BLT */ : begin if (alu_eq_zero == 0) npc = ppc + imm_b_sext; end
+						3'b 101 /* BGE */ : begin if (alu_eq_zero == 1) npc = ppc + imm_b_sext; end
+						3'b 110 /* BLTU */: begin if (alu_eq_zero == 0) npc = ppc + imm_b_sext; end
+						3'b 111 /* BGEU */: begin if (alu_eq_zero == 1) npc = ppc + imm_b_sext; end
 
 						default: illegalinsn = 1;
 					endcase
@@ -395,7 +398,6 @@ always_comb begin  //This is the same old ALU stuff from the labs. Nothing has b
 			// check that branches etc weren't to an unaligned address
 			if ((npc & 32'b11) != 0) begin
 				illegalinsn = 1;
-				npc = pc & ~32'b 11;
 			end
 
 		end
@@ -404,31 +406,47 @@ always_comb begin  //This is the same old ALU stuff from the labs. Nothing has b
     		npc = MTVEC_ADDR; //have to place this after the previous checks cause they set illegalinsn
     		regwrite = 0; csr_we = 0; dmem_wr_enable = 0; mret_flag = 0; halt = 0;
 		end //these checks can modify the other signals, so we have to return them back to 0
+
+		if (!pipe_valid || xe_flush) begin
+			csr_we = 0; mret_flag = 0; //dead slots must not touch the CSR file at all
+		end
 	end
 
     // every cycle
     always_ff @(posedge clock) begin
 
 		if (!trapped && !reset) begin
-			if (halt) //if ebreak we stop
+			if (pipe_valid && !xe_flush && halt) //if ebreak we stop
 				trapped <= 1; //This not the same as trap condition.
 		end
 
-        if (regwrite && insn_rd > 0) begin
+        if (pipe_valid && !xe_flush && regwrite && insn_rd > 0) begin
             regfile[insn_rd] <= rfilewdata;
             
     	end
 
         // LAB update the data memory here
-        if (dmem_wr_enable)
+        if (pipe_valid && !xe_flush && dmem_wr_enable)
             dmem[dmem_wr_addr] <= dmem_wr_data;
 
+		pipe_valid <= 1; //this is just a flag to say that the pipeline is valid. It is used in the testbench to check if the cpu has started executing instructions yet.
         // reset
-
-		pc <= npc;
+		// fetch cursor: freeze while priming (mem[0] already sits in the
+		// stage during reset, so hold pc one cycle or instruction 0 is eaten)
+		pc       <= halt        ? pc
+                : (!xe_flush && (npc != ppc + 4)) ? npc
+                                                  : pc + 4;
+		ppc      <= pc;
+		// one-cycle squash; the !xe_flush term stops a dying wrong-path
+		// slot's garbage decode (an illegal word -> npc=mtvec) from
+		// propagating the flush a second cycle onto the redirect target
+		xe_flush <= !halt && !xe_flush && (npc != ppc + 4);
 
         if (reset) begin
-		    pc <= 0;
+			pc <= 0;
+		    ppc <= 0;
+			pipe_valid <= 0;
+			xe_flush <= 0;
            	trapped <= 0;
         end
 
@@ -446,20 +464,25 @@ always_comb begin  //This is the same old ALU stuff from the labs. Nothing has b
 			else if (mret_flag) begin
 				csr_mip <= 32'h0; end //when mret happens clear that bit.
 
-
-			if (take_intr) begin
-				csr_mepc <= pc; 
-				csr_mcause <= 32'h8000000B;	end
+			if (pipe_valid && !xe_flush) begin
+				if (take_intr) begin
+					csr_mepc <= ppc; 
+					csr_mcause <= 32'h8000000B;	end
 			
-			else if (illegalinsn) begin
-				csr_mepc <= pc+4; 
-				csr_mcause <= 32'h00000002;end
+				else if (illegalinsn) begin
+					csr_mepc <= ppc+4; 
+					csr_mcause <= 32'h00000002;end
+			end
 		
 		end
 
 		
 
-		$display("pc=%h illegalinsn = %h intr = %h csr_mcause = %h  halt = %h csr_mepc = %h insn=%h take_intr=%b mip=%h mie=%h mstatus=%h x0 = %0d x1 = %0d x2 = %0d x3 =%0d x4 = %0d x5=%0d x6=%0d x7 = %0d x8 = %0d x9 = %0d x10=%0d ", pc, illegalinsn,intr, csr_mcause, halt, csr_mepc, insn, take_intr, csr_mip, csr_mie, csr_mstatus, $signed(regfile[0]),$signed(regfile[1]),$signed(regfile[2]),$signed(regfile[3]),$signed(regfile[4]),$signed(regfile[5]),regfile[6],regfile[7],regfile[8],regfile[9],regfile[10]);
+		$display("ppc=%h insn=%h fetch=%h npc=%h pv=%b flush=%b | take=%b illegal=%b halt=%b mcause=%h mepc=%h | mip=%h mie=%h mstatus=%h x0=%0d x1=%0d x2=%0d x3=%0d x4=%0d",
+			ppc, insn, pc, npc, pipe_valid, xe_flush,
+			take_intr, illegalinsn, halt, csr_mcause, csr_mepc,
+			csr_mip, csr_mie, csr_mstatus,
+			$signed(regfile[0]),$signed(regfile[1]),$signed(regfile[2]),$signed(regfile[3]),$signed(regfile[4]));
 		
 
     end

@@ -45,6 +45,7 @@ ALLFIRMWARE=firmware00_baseline.hex \
 	firmware21_mscratch_swap.hex \
 	firmware22_lwsw_across_interrupt.hex \
 	firmware23_double_illegal.hex \
+	firmware24_squash_canary.hex \
 
 # firmware18 holds the pin high through the handler return; the stock
 # one-cycle pulse is right for everything else.
